@@ -1,0 +1,3 @@
+FITBIT_CLIENT_ID = replace_with_your_fitbit_client_id
+FITBIT_REDIRECT_URI = fitbithealthsync://oauth/callback
+

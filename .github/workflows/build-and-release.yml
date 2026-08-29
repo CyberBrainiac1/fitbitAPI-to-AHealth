@@ -1,0 +1,121 @@
+name: Build and release iPhone app
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_to_testflight:
+        description: Upload the signed IPA to TestFlight
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        env:
+          APP_BUNDLE_ID: ${{ secrets.APP_BUNDLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CERTIFICATE_P12_BASE64: ${{ secrets.CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+          FITBIT_CLIENT_ID: ${{ secrets.FITBIT_CLIENT_ID }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          for name in APP_BUNDLE_ID APPLE_TEAM_ID CERTIFICATE_P12_BASE64 CERTIFICATE_PASSWORD FITBIT_CLIENT_ID PROVISIONING_PROFILE_BASE64; do
+            test -n "${!name}" || { echo "Missing repository secret: $name" >&2; exit 1; }
+          done
+
+      - name: Install signing identity and provisioning profile
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          echo "$CERTIFICATE_P12_BASE64" | base64 -D > "$RUNNER_TEMP/signing.p12"
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 -D > "$RUNNER_TEMP/profile.mobileprovision"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import "$RUNNER_TEMP/signing.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k build.keychain
+          security list-keychain -d user -s build.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$RUNNER_TEMP/profile.plist")
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+
+      - name: Add private Fitbit configuration
+        env:
+          FITBIT_CLIENT_ID: ${{ secrets.FITBIT_CLIENT_ID }}
+        run: |
+          cat > FitbitHealthSync/Configuration.xcconfig <<EOF
+          FITBIT_CLIENT_ID = $FITBIT_CLIENT_ID
+          FITBIT_REDIRECT_URI = fitbithealthsync://oauth/callback
+          EOF
+
+      - name: Archive and export signed IPA
+        env:
+          APP_BUNDLE_ID: ${{ secrets.APP_BUNDLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcodebuild archive \
+            -project FitbitHealthSync.xcodeproj \
+            -scheme FitbitHealthSync \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/FitbitHealthSync.xcarchive" \
+            CODE_SIGN_STYLE=Manual \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
+
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+            <key>provisioningProfiles</key><dict><key>$APP_BUNDLE_ID</key><string>$PROFILE_NAME</string></dict>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/FitbitHealthSync.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+          cp "$RUNNER_TEMP"/export/*.ipa FitbitHealthSync.ipa
+
+      - name: Save signed IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: FitbitHealthSync-${{ github.run_number }}
+          path: FitbitHealthSync.ipa
+          retention-days: 14
+
+      - name: Upload to TestFlight
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          APP_STORE_CONNECT_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_API_ISSUER }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+        run: |
+          test -n "$APP_STORE_CONNECT_API_ISSUER" || { echo 'Missing APP_STORE_CONNECT_API_ISSUER' >&2; exit 1; }
+          test -n "$APP_STORE_CONNECT_API_KEY_ID" || { echo 'Missing APP_STORE_CONNECT_API_KEY_ID' >&2; exit 1; }
+          test -n "$APP_STORE_CONNECT_API_KEY_BASE64" || { echo 'Missing APP_STORE_CONNECT_API_KEY_BASE64' >&2; exit 1; }
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 -D > "$HOME/.appstoreconnect/private_keys/AuthKey_$APP_STORE_CONNECT_API_KEY_ID.p8"
+          xcrun altool --upload-app --type ios --file FitbitHealthSync.ipa \
+            --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_API_ISSUER"
