@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLSchemes</key><array><string>fitbithealthsync</string></array></dict></array>
+  <key>FITBIT_CLIENT_ID</key><string>$(FITBIT_CLIENT_ID)</string>
+  <key>FITBIT_REDIRECT_URI</key><string>$(FITBIT_REDIRECT_URI)</string>
+  <key>NSHealthShareUsageDescription</key><string>Fitbit Health Sync checks existing imports to prevent duplicate health records.</string>
+  <key>NSHealthUpdateUsageDescription</key><string>Fitbit Health Sync saves the Fitbit wellness data you choose into Apple Health.</string>
+  <key>UILaunchScreen</key><dict/>
+</dict></plist>
+
